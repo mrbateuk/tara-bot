@@ -1,31 +1,27 @@
-"""Claude agent with tool-calling — Tara v2.
+"""Gemini agent with tool-calling — Tara v2 (Ported).
 
-Upgrade từ so sánh với ota_planner (anh Tiến):
-- Prompt caching: cache_control ephemeral trên system prompt (frozen)
-- Adaptive thinking: Claude tự quyết khi nào dùng extended thinking
-- Streaming: messages.stream() thay vì messages.create()
-- Bug fix: lưu response.content (list of blocks) vào history, không phải reply_text (string)
-- max_tokens tăng lên 16000 để đủ chỗ cho thinking blocks
-- Dynamic content (TODAY) inject vào user message, không vào system prompt
+Sự thay đổi:
+- Chuyển sang google.generativeai (Gemini 1.5 Flash - Tốc độ cao, miễn phí).
+- Lược bỏ JSON schema: Gemini tự đọc docstring của hàm Python làm công cụ.
+- Quản lý bộ nhớ: Tự động qua object chat.send_message().
 """
 
 from __future__ import annotations
 
 import json
-import asyncio
 from typing import Any, AsyncGenerator
 from datetime import date
 
-from anthropic import Anthropic
-from anthropic.types import ToolUseBlock, TextBlock
+import google.generativeai as genai
+from google.generativeai.types import content_types
 
 from .config import Config
 from .tools.serpapi import search_flights, search_shopping
 
-# ── System prompt — FROZEN ────────────────────────────────────────────
-# cache_control: ephemeral nhắm vào block này.
-# KHÔNG đặt dynamic content (ngày, tên user) vào đây —
-# bất kỳ thay đổi nào sẽ invalidate cache cho đến request tiếp theo.
+# ── Cấu hình ─────────────────────────────────────────────────────────
+
+# Lưu ý: Cần thêm gemini_api_key vào class Config trong file config.py của bạn
+genai.configure(api_key=Config.gemini_api_key)
 
 SYSTEM_PROMPT = """Bạn là Tara Bot — agent thông minh chuyên tìm vé máy bay và săn giá đồ.
 
@@ -41,192 +37,102 @@ Mặc định cho câu hỏi mơ hồ về thời gian:
 - "cuối tuần" → thứ Sáu tuần gần nhất (không quá khứ)
 - "tuần sau" → tuần tiếp theo"""
 
-# ── Tool definitions ──────────────────────────────────────────────────
-
-FLIGHT_TOOL: dict = {
-    "name": "search_flights",
-    "description": "Tìm chuyến bay. Trả về giá, hãng, giờ bay.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "departure_id":  {"type": "string", "description": "Mã sân bay đi (IATA). Mặc định SGN"},
-            "arrival_id":    {"type": "string", "description": "Mã sân bay đến (IATA)"},
-            "outbound_date": {"type": "string", "description": "Ngày đi (YYYY-MM-DD)"},
-            "return_date":   {"type": "string", "description": "Ngày về (YYYY-MM-DD)"},
-            "adults":        {"type": "integer", "description": "Số người lớn. Mặc định 1"},
-        },
-        "required": ["arrival_id"],
-    },
-}
-
-SHOPPING_TOOL: dict = {
-    "name": "search_shopping",
-    "description": "Tìm sản phẩm, so sánh giá.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Tên sản phẩm cần tìm"},
-        },
-        "required": ["query"],
-    },
-}
-
-ALL_TOOLS = [FLIGHT_TOOL, SHOPPING_TOOL]
-TOOL_FUNCTIONS: dict[str, Any] = {
-    "search_flights":  search_flights,
-    "search_shopping": search_shopping,
-}
+# Với Gemini, ta nạp trực tiếp function vào list, hệ thống sẽ tự phân tích biến số
+ALL_TOOLS = [search_flights, search_shopping]
 MAX_TOOL_ITERATIONS = 5
-
 
 # ── Agent ─────────────────────────────────────────────────────────────
 
 class Agent:
     def __init__(self):
-        self.client  = Anthropic(api_key=Config.anthropic_api_key)
-        self.model   = "claude-sonnet-4-6"
-        self.history: list[dict] = []
-
-    def _system(self) -> list[dict]:
-        """System prompt với cache_control. Frozen — không thay đổi giữa các request."""
-        return [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+        # Sử dụng model Flash cho tốc độ vượt trội trong các tác vụ chat real-time
+        self.model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT,
+            tools=ALL_TOOLS,
+        )
+        # Gemini tự lưu lịch sử trong object này
+        self.chat_session = self.model.start_chat(history=[])
 
     def _with_date(self, user_message: str) -> str:
-        """Inject ngày hôm nay vào user message — KHÔNG vào system prompt."""
+        """Inject ngày hôm nay vào user message."""
         today = date.today().strftime("%A, %d/%m/%Y")
         return f"[Hôm nay: {today}]\n{user_message}"
 
     def chat(self, user_message: str) -> str:
         """Sync chat — tool-use loop, trả về text cuối cùng."""
-        messages = list(self.history)
         injected = self._with_date(user_message)
-        messages.append({"role": "user", "content": injected})
 
         for iteration in range(MAX_TOOL_ITERATIONS):
-            response = self._call_claude(messages)
+            response = self.chat_session.send_message(injected)
 
-            # BUG FIX so với agents.py cũ:
-            # Lưu response.content (list of blocks), KHÔNG phải reply_text (string).
-            # Khi bật thinking, thinking blocks phải tồn tại trong history —
-            # nếu chỉ lưu text string, API sẽ báo lỗi ở turn tiếp theo.
-            messages.append({"role": "assistant", "content": response.content})
+            if response.function_call:
+                # Trích xuất tên tool và tham số
+                part = response.parts[0]
+                func_name = part.function_call.name
+                func_args = {k: v for k, v in part.function_call.args.items()}
 
-            u = response.usage
-            print(
-                f"[iter {iteration + 1}] "
-                f"cache_read={getattr(u, 'cache_read_input_tokens', 0)} "
-                f"cache_create={getattr(u, 'cache_creation_input_tokens', 0)} "
-                f"input={u.input_tokens} output={u.output_tokens} "
-                f"stop={response.stop_reason}"
-            )
+                print(f"[iter {iteration + 1}] Gọi hàm: {func_name} với tham số {func_args}")
 
-            if response.stop_reason == "end_turn":
-                reply = "\n".join(
-                    b.text for b in response.content if isinstance(b, TextBlock)
+                # Thực thi tool
+                if func_name == "search_flights":
+                    result = search_flights(**func_args)
+                elif func_name == "search_shopping":
+                    result = search_shopping(**func_args)
+                else:
+                    result = "Lỗi: Không tìm thấy tool."
+
+                # Gói kết quả để gửi lại cho mô hình trong vòng lặp tiếp theo
+                injected = content_types.Part.from_function_response(
+                    name=func_name,
+                    response={"result": str(result)}
                 )
-                # Persist vào history sau khi xong turn
-                self.history.append({"role": "user",      "content": injected})
-                self.history.append({"role": "assistant", "content": response.content})
-                return reply
-
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                for block in response.content:
-                    if not isinstance(block, ToolUseBlock):
-                        continue
-                    result = self._execute_tool(block)
-                    tool_results.append({
-                        "type":        "tool_result",
-                        "tool_use_id": block.id,
-                        "content":     str(result),
-                    })
-                messages.append({"role": "user", "content": tool_results})
-                continue
-
-            break  # stop_reason khác
+            else:
+                # Nếu không gọi tool, trả về văn bản
+                return response.text
 
         return "Xin lỗi, em không thể xử lý yêu cầu này. Thử lại với câu hỏi đơn giản hơn nhé!"
 
     async def stream_chat(self, user_message: str) -> AsyncGenerator[str | dict, None]:
-        """Async generator stream cho Telegram fake-streaming.
-
-        Yields:
-            str  — text chunk để bot edit_message realtime
-            dict — {"type": "tool_use", "name": "..."} để hiện pill trạng thái
-        """
-        messages = list(self.history)
+        """Async generator stream cho Telegram fake-streaming."""
         injected = self._with_date(user_message)
-        messages.append({"role": "user", "content": injected})
 
         for iteration in range(MAX_TOOL_ITERATIONS):
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=16000,
-                system=self._system(),
-                tools=ALL_TOOLS,
-                thinking={"type": "adaptive"},
-                messages=messages,
-            ) as stream:
-                for chunk in stream.text_stream:
-                    yield chunk
+            response = self.chat_session.send_message(injected, stream=True)
 
-                final = stream.final_message()
+            has_tool_call = False
+            func_name = None
+            func_args = {}
 
-            u = final.usage
-            print(
-                f"[stream iter {iteration + 1}] "
-                f"cache_read={getattr(u, 'cache_read_input_tokens', 0)} "
-                f"stop={final.stop_reason}"
-            )
+            # Duyệt qua các chunk trả về
+            for chunk in response:
+                # Nếu LLM quyết định gọi tool
+                if chunk.function_call:
+                    has_tool_call = True
+                    func_name = chunk.function_call.name
+                    func_args = {k: v for k, v in chunk.function_call.args.items()}
+                    # Yield pill trạng thái cho Telegram
+                    yield {"type": "tool_use", "name": func_name}
+                
+                # Nếu LLM sinh ra văn bản
+                if chunk.text:
+                    yield chunk.text
 
-            messages.append({"role": "assistant", "content": final.content})
+            # Xử lý kết quả tool SAU KHI stream của iteration này kết thúc
+            if has_tool_call:
+                print(f"[stream iter {iteration + 1}] Chạy: {func_name}")
+                if func_name == "search_flights":
+                    result = search_flights(**func_args)
+                elif func_name == "search_shopping":
+                    result = search_shopping(**func_args)
+                else:
+                    result = "Lỗi khi chạy tool."
 
-            if final.stop_reason == "end_turn":
-                self.history.append({"role": "user",      "content": injected})
-                self.history.append({"role": "assistant", "content": final.content})
-                return
-
-            if final.stop_reason == "tool_use":
-                tool_results = []
-                for block in final.content:
-                    if not isinstance(block, ToolUseBlock):
-                        continue
-                    yield {"type": "tool_use", "name": block.name}
-                    result = self._execute_tool(block)
-                    tool_results.append({
-                        "type":        "tool_result",
-                        "tool_use_id": block.id,
-                        "content":     str(result),
-                    })
-                messages.append({"role": "user", "content": tool_results})
-                continue
-
-            break
-
-    def _call_claude(self, messages: list) -> Any:
-        import time
-        for attempt in range(3):
-            try:
-                return self.client.messages.create(
-                    model=self.model,
-                    max_tokens=16000,
-                    system=self._system(),
-                    tools=ALL_TOOLS,
-                    thinking={"type": "adaptive"},
-                    messages=messages,
+                # Nạp kết quả vào để chuẩn bị cho iteration tiếp theo phân tích
+                injected = content_types.Part.from_function_response(
+                    name=func_name,
+                    response={"result": str(result)}
                 )
-            except Exception as exc:
-                if "429" in str(exc) or "rate_limit" in str(exc).lower():
-                    time.sleep(30 * (attempt + 1))
-                    continue
-                raise
-        raise Exception("Claude API: rate limit exceeded after 3 retries")
-
-    def _execute_tool(self, block: ToolUseBlock) -> str:
-        fn = TOOL_FUNCTIONS.get(block.name)
-        if not fn:
-            return f"Unknown tool: {block.name}"
-        try:
-            return fn(**block.input)
-        except Exception as e:
-            return f"Lỗi khi chạy {block.name}: {e}"
+                continue
+            else:
+                break
