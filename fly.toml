@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for tara-bot on 2026-05-11T22:21:12+07:00
+# fly.toml app configuration file generated for tara-bot-tqjsxw on 2026-05-15T16:04:49Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'tara-bot'
+app = 'tara-bot-tqjsxw'
 primary_region = 'sin'
 
 [build]
