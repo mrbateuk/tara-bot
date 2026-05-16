@@ -43,7 +43,7 @@ class Agent:
     def __init__(self):
         # Sử dụng bản 1.5-flash để giảm thiểu rủi ro bị limit=0 ở gói Miễn phí
         self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-2.5-flash",
             system_instruction=SYSTEM_PROMPT,
             tools=ALL_TOOLS,
         )
