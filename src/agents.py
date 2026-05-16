@@ -7,7 +7,6 @@ from typing import Any, AsyncGenerator
 from datetime import date
 
 import google.generativeai as genai
-from google.generativeai.types import content_types
 
 from .config import Config
 from .tools.serpapi import search_flights, search_shopping
@@ -37,7 +36,6 @@ MAX_TOOL_ITERATIONS = 5
 
 class Agent:
     def __init__(self):
-        # Đã cập nhật lên model mới nhất để tránh lỗi 404
         self.model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=SYSTEM_PROMPT,
@@ -61,7 +59,6 @@ class Agent:
             func_name = None
             func_args = {}
 
-            # CÁCH CHECK MỚI: Duyệt qua các parts để tìm function_call
             if response.parts:
                 for part in response.parts:
                     if part.function_call:
@@ -80,10 +77,13 @@ class Agent:
                 else:
                     result = "Lỗi: Không tìm thấy tool."
 
-                injected = content_types.Part.from_function_response(
-                    name=func_name,
-                    response={"result": str(result)}
-                )
+                # CÁCH FIX MỚI: Truyền thẳng Dictionary nguyên bản
+                injected = [{
+                    "function_response": {
+                        "name": func_name,
+                        "response": {"result": str(result)}
+                    }
+                }]
             else:
                 return response.text
 
@@ -100,23 +100,18 @@ class Agent:
             func_name = None
             func_args = {}
 
-            # Duyệt qua các chunk trả về
             for chunk in response:
                 if not chunk.parts:
                     continue
                 for part in chunk.parts:
-                    # Nếu LLM quyết định gọi tool
                     if part.function_call:
                         has_tool_call = True
                         func_name = part.function_call.name
                         func_args = {k: v for k, v in part.function_call.args.items()}
                         yield {"type": "tool_use", "name": func_name}
-                    
-                    # Nếu LLM sinh ra văn bản
                     elif part.text:
                         yield part.text
 
-            # Xử lý kết quả tool SAU KHI stream kết thúc
             if has_tool_call:
                 print(f"[stream iter {iteration + 1}] Chạy: {func_name}")
                 if func_name == "search_flights":
@@ -126,11 +121,13 @@ class Agent:
                 else:
                     result = "Lỗi khi chạy tool."
 
-                # Nạp kết quả vào để chuẩn bị cho iteration tiếp theo
-                injected = content_types.Part.from_function_response(
-                    name=func_name,
-                    response={"result": str(result)}
-                )
+                # CÁCH FIX MỚI: Truyền thẳng Dictionary nguyên bản
+                injected = [{
+                    "function_response": {
+                        "name": func_name,
+                        "response": {"result": str(result)}
+                    }
+                }]
                 continue
             else:
                 break
