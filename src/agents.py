@@ -17,13 +17,18 @@ genai.configure(api_key=Config.gemini_api_key)
 
 SYSTEM_PROMPT = """Bạn là Tara Bot — agent thông minh chuyên tìm vé máy bay và săn giá đồ.
 
-NGUYÊN TẮC:
-- Trả lời bằng tiếng Việt tự nhiên, thân thiện.
-- Khi user hỏi vé máy bay, gọi tool search_flights.
-- Khi user hỏi giá sản phẩm, gọi tool search_shopping.
-- Sau khi tool trả kết quả, chuyển tiếp NGUYÊN VĂN kết quả đó cho user, chỉ thêm 1-2 câu ngắn.
-- KHÔNG reformat lại kết quả từ tool.
-- Có thể nói chuyện thông thường — không cần gọi tool.
+NGUYÊN TẮC QUAN TRỌNG KHI GỌI TOOL:
+1. Tool search_flights: BẮT BUỘC sử dụng mã sân bay IATA. Ví dụ:
+   - Hà Nội -> HAN
+   - Sài Gòn/Hồ Chí Minh -> SGN
+   - Đà Nẵng -> DAD
+   - Phú Quốc -> PQC
+   - Nha Trang -> CXR
+   - Hải Phòng -> HPH
+   Định dạng ngày bay (outbound_date, return_date) bắt buộc là YYYY-MM-DD.
+2. Trả lời bằng tiếng Việt tự nhiên, thân thiện.
+3. Sau khi tool trả kết quả, chuyển tiếp NGUYÊN VĂN kết quả đó cho user, chỉ thêm 1-2 câu ngắn. KHÔNG tự ý reformat lại kết quả từ tool.
+4. Có thể nói chuyện thông thường — không cần gọi tool.
 
 Mặc định cho câu hỏi mơ hồ về thời gian:
 - "cuối tuần" → thứ Sáu tuần gần nhất (không quá khứ)
@@ -36,6 +41,7 @@ MAX_TOOL_ITERATIONS = 5
 
 class Agent:
     def __init__(self):
+        # Đã cập nhật lên model mới nhất để tránh lỗi 404
         self.model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=SYSTEM_PROMPT,
@@ -59,6 +65,7 @@ class Agent:
             func_name = None
             func_args = {}
 
+            # Duyệt qua các parts để tìm function_call (Chuẩn API Gemini)
             if response.parts:
                 for part in response.parts:
                     if part.function_call:
@@ -77,7 +84,7 @@ class Agent:
                 else:
                     result = "Lỗi: Không tìm thấy tool."
 
-                # CÁCH FIX MỚI: Truyền thẳng Dictionary nguyên bản
+                # Trả kết quả tool về cho Gemini bằng raw dictionary
                 injected = [{
                     "function_response": {
                         "name": func_name,
@@ -104,14 +111,18 @@ class Agent:
                 if not chunk.parts:
                     continue
                 for part in chunk.parts:
+                    # Nếu LLM quyết định gọi tool
                     if part.function_call:
                         has_tool_call = True
                         func_name = part.function_call.name
                         func_args = {k: v for k, v in part.function_call.args.items()}
                         yield {"type": "tool_use", "name": func_name}
+                    
+                    # Nếu LLM sinh ra văn bản
                     elif part.text:
                         yield part.text
 
+            # Xử lý kết quả tool SAU KHI stream kết thúc
             if has_tool_call:
                 print(f"[stream iter {iteration + 1}] Chạy: {func_name}")
                 if func_name == "search_flights":
@@ -121,7 +132,7 @@ class Agent:
                 else:
                     result = "Lỗi khi chạy tool."
 
-                # CÁCH FIX MỚI: Truyền thẳng Dictionary nguyên bản
+                # Trả kết quả tool về cho Gemini bằng raw dictionary
                 injected = [{
                     "function_response": {
                         "name": func_name,
