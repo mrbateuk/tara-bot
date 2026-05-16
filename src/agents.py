@@ -47,7 +47,7 @@ class Agent:
     def __init__(self):
         # Sử dụng model Flash cho tốc độ vượt trội trong các tác vụ chat real-time
         self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-2.5-flash",
             system_instruction=SYSTEM_PROMPT,
             tools=ALL_TOOLS,
         )
