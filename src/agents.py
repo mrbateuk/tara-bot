@@ -44,4 +44,101 @@ class Agent:
         # Sử dụng gemini-2.0-flash cho tốc độ, độ ổn định và tối ưu hạn mức Free Tier
         self.model = genai.GenerativeModel(
             model_name="gemini-2.0-flash",
-            system_instruction=SYSTEM_PRO
+            system_instruction=SYSTEM_PROMPT,
+            tools=ALL_TOOLS,
+        )
+        self.chat_session = self.model.start_chat(history=[])
+
+    def _with_date(self, user_message: str) -> str:
+        """Inject ngày hôm nay vào user message."""
+        today = date.today().strftime("%A, %d/%m/%Y")
+        return f"[Hôm nay: {today}]\n{user_message}"
+
+    def chat(self, user_message: str) -> str:
+        """Sync chat — tool-use loop, trả về text cuối cùng."""
+        injected = self._with_date(user_message)
+
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            response = self.chat_session.send_message(injected)
+
+            has_tool_call = False
+            func_name = None
+            func_args = {}
+
+            # Duyệt qua các parts để tìm function_call (Chuẩn API Gemini)
+            if response.parts:
+                for part in response.parts:
+                    if part.function_call:
+                        has_tool_call = True
+                        func_name = part.function_call.name
+                        func_args = {k: v for k, v in part.function_call.args.items()}
+                        break
+
+            if has_tool_call:
+                print(f"[iter {iteration + 1}] Gọi hàm: {func_name} với tham số {func_args}")
+
+                if func_name == "search_flights":
+                    result = search_flights(**func_args)
+                elif func_name == "search_shopping":
+                    result = search_shopping(**func_args)
+                else:
+                    result = "Lỗi: Không tìm thấy tool."
+
+                # Trả kết quả tool về cho Gemini bằng cấu trúc Dictionary nguyên bản
+                injected = [{
+                    "function_response": {
+                        "name": func_name,
+                        "response": {"result": str(result)}
+                    }
+                }]
+            else:
+                return response.text
+
+        return "Xin lỗi, em không thể xử lý yêu cầu này. Thử lại với câu hỏi đơn giản hơn nhé!"
+
+    async def stream_chat(self, user_message: str) -> AsyncGenerator[str | dict, None]:
+        """Async generator stream cho Telegram fake-streaming."""
+        injected = self._with_date(user_message)
+
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            response = self.chat_session.send_message(injected, stream=True)
+
+            has_tool_call = False
+            func_name = None
+            func_args = {}
+
+            for chunk in response:
+                if not chunk.parts:
+                    continue
+                for part in chunk.parts:
+                    # Nếu LLM quyết định gọi tool
+                    if part.function_call:
+                        has_tool_call = True
+                        func_name = part.function_call.name
+                        func_args = {k: v for k, v in part.function_call.args.items()}
+                        yield {"type": "tool_use", "name": func_name}
+                    
+                    # Nếu LLM sinh ra văn bản
+                    elif part.text:
+                        yield part.text
+
+            # Xử lý kết quả tool SAU KHI stream kết thúc
+            if has_tool_call:
+                print(f"[stream iter {iteration + 1}] Chạy: {func_name}")
+                if func_name == "search_flights":
+                    result = search_flights(**func_args)
+                elif func_name == "search_shopping":
+                    result = search_shopping(**func_args)
+                else:
+                    result = "Lỗi khi chạy tool."
+
+                # Trả kết quả tool về cho Gemini bằng cấu trúc Dictionary nguyên bản
+                injected = [{
+                    "function_response": {
+                        "name": func_name,
+                        "response": {"result": str(result)}
+                    }
+                }]
+                continue
+            else:
+                break
