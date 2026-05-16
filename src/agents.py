@@ -41,9 +41,9 @@ MAX_TOOL_ITERATIONS = 5
 
 class Agent:
     def __init__(self):
-        # Sử dụng gemini-2.0-flash cho tốc độ, độ ổn định và tối ưu hạn mức Free Tier
+        # Sử dụng bản 1.5-flash để giảm thiểu rủi ro bị limit=0 ở gói Miễn phí
         self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-1.5-flash",
             system_instruction=SYSTEM_PROMPT,
             tools=ALL_TOOLS,
         )
@@ -84,7 +84,7 @@ class Agent:
                 else:
                     result = "Lỗi: Không tìm thấy tool."
 
-                # Trả kết quả tool về cho Gemini bằng cấu trúc Dictionary nguyên bản
+                # Trả kết quả tool về cho Gemini bằng raw dictionary
                 injected = [{
                     "function_response": {
                         "name": func_name,
@@ -132,7 +132,7 @@ class Agent:
                 else:
                     result = "Lỗi khi chạy tool."
 
-                # Trả kết quả tool về cho Gemini bằng cấu trúc Dictionary nguyên bản
+                # Trả kết quả tool về cho Gemini bằng raw dictionary
                 injected = [{
                     "function_response": {
                         "name": func_name,
